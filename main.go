@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/term"
 )
@@ -28,12 +29,12 @@ type Animation struct {
 	frames         []Frame
 	highlightColor string
 	frameCount     int
+	width          int // Widest line, without color tags and trailing spaces
+	height         int // Most lines in a frame
 }
 
 // Constants
 const (
-	ImageWidth      = 77
-	ImageHeight     = 41
 	MicrosPerFrame  = 35000
 	FrameDelay      = MicrosPerFrame / 1000
 	ClearScreen     = "\x1b[2J"
@@ -45,6 +46,9 @@ const (
 	ColorEndTag     = "</c>"
 	ResetColor      = "\x1b[0m"
 )
+
+// tagStripper removes the color tags, to measure a line's visible width
+var tagStripper = strings.NewReplacer(ColorStartTag, "", ColorEndTag, "")
 
 // Color mapping
 var colorMap = map[string]string{
@@ -85,11 +89,14 @@ func (a *Animation) Initialize(animationData [][]string) {
 
 	for frameIndex, frameLines := range animationData {
 		processedLines := make([]string, len(frameLines))
+		a.height = max(a.height, len(frameLines))
 
 		for lineIndex, line := range frameLines {
 			// Trailing spaces are dropped: the renderer erases the rest of each line
-			// anyway, and some blank lines are wider than the image
+			// anyway, and padded blank lines would make the image look wider
 			processedLines[lineIndex] = a.processColorCodes(strings.TrimRight(line, " "))
+			visible := strings.TrimRight(tagStripper.Replace(line), " ")
+			a.width = max(a.width, utf8.RuneCountInString(visible))
 		}
 
 		a.frames[frameIndex] = Frame{Lines: processedLines}
@@ -230,8 +237,9 @@ func (t *Terminal) RenderFrame(animation *Animation, frameIndex int) {
 		return
 	}
 
-	verticalPadding := max(0, (t.height-ImageHeight)/2)
-	horizontalPadding := max(0, (t.width-ImageWidth)/2)
+	// Center the image based on the size of the animation data
+	verticalPadding := max(0, (t.height-animation.height)/2)
+	horizontalPadding := max(0, (t.width-animation.width)/2)
 
 	// Start fresh buffer
 	t.outputBuffer = t.outputBuffer[:0]
