@@ -36,7 +36,10 @@ const (
 	ImageHeight     = 41
 	MicrosPerFrame  = 35000
 	FrameDelay      = MicrosPerFrame / 1000
-	ClearAndHome    = "\x1b[2J\x1b[H"
+	ClearScreen     = "\x1b[2J"
+	EraseLineRight  = "\x1b[K"
+	BeginSync       = "\x1b[?2026h" // Synchronized output: the terminal holds rendering...
+	EndSync         = "\x1b[?2026l" // ...until the frame is complete (ignored if unsupported)
 	DefaultDuration = 0
 	ColorStartTag   = "<c>"
 	ColorEndTag     = "</c>"
@@ -84,7 +87,9 @@ func (a *Animation) Initialize(animationData [][]string) {
 		processedLines := make([]string, len(frameLines))
 
 		for lineIndex, line := range frameLines {
-			processedLines[lineIndex] = a.processColorCodes(line)
+			// Trailing spaces are dropped: the renderer erases the rest of each line
+			// anyway, and some blank lines are wider than the image
+			processedLines[lineIndex] = a.processColorCodes(strings.TrimRight(line, " "))
 		}
 
 		a.frames[frameIndex] = Frame{Lines: processedLines}
@@ -160,61 +165,39 @@ func (a *Animation) FrameCount() int {
 
 // Terminal represents terminal state and operations
 type Terminal struct {
-	width                 int
-	height                int
-	shouldRender          bool
-	lastFrameIndex        int
-	lastVerticalPadding   int
-	lastHorizontalPadding int
-	paddingCache          map[int]string
-	newlineCache          map[int]string
-	outputBuffer          []byte
+	width          int
+	height         int
+	needsClear     bool
+	lastFrameIndex int
+	outputBuffer   []byte
 }
 
 // NewTerminal creates a new terminal instance
 func NewTerminal() *Terminal {
-	width, height, _ := term.GetSize(int(os.Stdout.Fd()))
-	if width == 0 {
-		width = 80
-	}
-	if height == 0 {
-		height = 24
-	}
+	width, height := terminalSize()
 
 	return &Terminal{
 		width:          width,
 		height:         height,
-		shouldRender:   true,
+		needsClear:     true,
 		lastFrameIndex: -1,
-		paddingCache:   make(map[int]string),
-		newlineCache:   make(map[int]string),
 		outputBuffer:   make([]byte, 0, 64*1024), // 64KB buffer
 	}
 }
 
-// GetPaddingString returns cached padding string
-func (t *Terminal) GetPaddingString(width int) string {
-	if str, exists := t.paddingCache[width]; exists {
-		return str
+// terminalSize returns the terminal dimensions, falling back to 80x24 when
+// they cannot be determined (e.g. stdout is not a terminal)
+func terminalSize() (int, int) {
+	width, height, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil || width <= 0 || height <= 0 {
+		return 80, 24
 	}
-	str := strings.Repeat(" ", width)
-	t.paddingCache[width] = str
-	return str
-}
-
-// GetNewlineString returns cached newline string
-func (t *Terminal) GetNewlineString(count int) string {
-	if str, exists := t.newlineCache[count]; exists {
-		return str
-	}
-	str := strings.Repeat("\n", count)
-	t.newlineCache[count] = str
-	return str
+	return width, height
 }
 
 // WriteToBuffer writes string to output buffer
 func (t *Terminal) WriteToBuffer(str string) {
-	t.outputBuffer = append(t.outputBuffer, []byte(str)...)
+	t.outputBuffer = append(t.outputBuffer, str...)
 }
 
 // FlushBuffer flushes the output buffer to stdout
@@ -227,65 +210,54 @@ func (t *Terminal) FlushBuffer() {
 
 // UpdateSize updates terminal dimensions
 func (t *Terminal) UpdateSize() {
-	width, height, _ := term.GetSize(int(os.Stdout.Fd()))
+	width, height := terminalSize()
 	if width != t.width || height != t.height {
 		t.width = width
 		t.height = height
-		t.shouldRender = true
-		// Clear caches on resize
-		t.paddingCache = make(map[int]string)
-		t.newlineCache = make(map[int]string)
+		t.needsClear = true
 	}
 }
 
-// RenderFrame renders a single frame
+// RenderFrame renders a single frame.
+//
+// The previous frame is overwritten in place rather than clearing the screen
+// first, and the whole frame is sent as one synchronized update. Otherwise
+// terminals that render independently of the output stream (e.g. Ghostty) can
+// show the cleared screen for a moment, which looks like flickering.
 func (t *Terminal) RenderFrame(animation *Animation, frameIndex int) {
-	verticalPadding := max(0, (t.height-ImageHeight)/2)
-	horizontalPadding := max(0, (t.width-ImageWidth)/2)
-
-	// Only recalculate padding if dimensions changed
-	paddingChanged := verticalPadding != t.lastVerticalPadding ||
-		horizontalPadding != t.lastHorizontalPadding
-
-	if paddingChanged {
-		t.lastVerticalPadding = verticalPadding
-		t.lastHorizontalPadding = horizontalPadding
-		t.shouldRender = true
-	}
-
 	// If nothing changed, skip rendering
-	if !t.shouldRender && frameIndex == t.lastFrameIndex {
+	if !t.needsClear && frameIndex == t.lastFrameIndex {
 		return
 	}
 
-	// Get cached padding strings
-	paddingStr := t.GetPaddingString(horizontalPadding)
-	verticalPaddingStr := t.GetNewlineString(verticalPadding)
+	verticalPadding := max(0, (t.height-ImageHeight)/2)
+	horizontalPadding := max(0, (t.width-ImageWidth)/2)
 
 	// Start fresh buffer
 	t.outputBuffer = t.outputBuffer[:0]
+	t.WriteToBuffer(BeginSync)
 
-	// Clear screen and move cursor to home
-	t.WriteToBuffer(ClearAndHome)
-
-	// Add vertical padding
-	if verticalPadding > 0 {
-		t.WriteToBuffer(verticalPaddingStr)
+	// A full clear is only needed when the layout changed
+	if t.needsClear {
+		t.WriteToBuffer(ClearScreen)
 	}
 
-	// Get pre-split lines and render
-	lines := animation.GetFrameLines(frameIndex)
-	for i, line := range lines {
-		t.WriteToBuffer(paddingStr)
-		t.WriteToBuffer(line)
-		if i < len(lines)-1 {
-			t.WriteToBuffer("\n")
+	for i, line := range animation.GetFrameLines(frameIndex) {
+		row := verticalPadding + i + 1
+		if row > t.height {
+			break // Terminal is shorter than the image; don't scroll
 		}
+		// Move to the start of the line, draw it and erase leftovers of the previous frame
+		t.outputBuffer = fmt.Appendf(t.outputBuffer, "\x1b[%d;%dH", row, horizontalPadding+1)
+		t.WriteToBuffer(line)
+		t.WriteToBuffer(EraseLineRight)
 	}
+
+	t.WriteToBuffer(EndSync)
 
 	// Flush the buffer to stdout
 	t.FlushBuffer()
-	t.shouldRender = false
+	t.needsClear = false
 	t.lastFrameIndex = frameIndex
 }
 
@@ -351,8 +323,9 @@ func showColorHelp() {
 
 // cleanup performs cleanup operations
 func cleanup() {
-	// Disable focus reporting, show cursor and restore main screen buffer
-	fmt.Print("\x1b[?25h\x1b[?1049l")
+	// End any unfinished synchronized update, re-enable line wrapping,
+	// show cursor and restore main screen buffer
+	fmt.Print(EndSync + "\x1b[?7h\x1b[?25h\x1b[?1049l")
 }
 
 // runAnimation runs the main animation loop
@@ -418,8 +391,9 @@ func main() {
 		os.Exit(0)
 	}()
 
-	// Enable screen buffer
-	fmt.Print("\x1b[?1049h\x1b[?25l")
+	// Switch to alternate screen buffer, hide cursor and disable line wrapping
+	// (lines wider than the terminal get cut off instead of wrapping/scrolling)
+	fmt.Print("\x1b[?1049h\x1b[?25l\x1b[?7l")
 
 	// Cleanup on exit
 	defer cleanup()
