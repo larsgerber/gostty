@@ -68,6 +68,7 @@ var colorMap = map[string]string{
 	"brightmagenta": "\x1b[95m",
 	"brightcyan":    "\x1b[96m",
 	"brightwhite":   "\x1b[97m",
+	"purple":        "\x1b[38;2;108;52;147m", // 24-bit color #6c3493
 }
 
 // NewAnimation creates a new animation instance
