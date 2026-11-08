@@ -23,7 +23,7 @@ The iconic <a href="https://ghostty.org">ghostty.org</a> animation in your termi
 
 ### Prerequisites
 
-[Go 1.23.2+](https://golang.org/doc/install)
+[Go 1.27+](https://golang.org/doc/install)
 
 ### Install via `go install`
 
@@ -60,12 +60,12 @@ gostty [options]
 
 ### Options
 
-| Flag               | Description                                         |
-|--------------------|-----------------------------------------------------|
-| `-c`, `--color`    | Set highlight color (name or ANSI code)             |
-| `-t`, `--timer`    | Run animation for a fixed number of seconds         |
-| `--colors`         | Show supported colors                               |
-| `-h`, `--help`     | Show help                                           |
+| Flag            | Description                                 |
+| --------------- | ------------------------------------------- |
+| `-c`, `--color` | Set highlight color (name or ANSI code)     |
+| `-t`, `--timer` | Run animation for a fixed number of seconds |
+| `--colors`      | Show supported colors                       |
+| `-h`, `--help`  | Show help                                   |
 
 ## Examples
 
